@@ -76,7 +76,7 @@ def run_bot():
             print(f"✅ Salvestatud: BTC @ {round(current_price, 2)} | Otsus: {action}")
             
             # Ootame 15 minutit enne järgmist kontrolli
-            time.sleep(900)
+            time.sleep(60)
             
         except Exception as e:
             print(f"❌ Viga tekkis: {e}")
