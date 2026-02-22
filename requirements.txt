@@ -1,0 +1,5 @@
+supabase
+yfinance
+pandas_ta
+python-dotenv
+requests
