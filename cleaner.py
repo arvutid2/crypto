@@ -19,22 +19,18 @@ def run_smart_cleanup():
         cutoff_date = (datetime.now() - timedelta(days=3)).isoformat()
         
         # 2. KUSTUTAME: Ainult 'HOLD' read, mis on vanemad kui 3 päeva
-        # NB! 'BUY' ja 'SELL' read jäävad puutumata, sest neil puudub tingimus 'HOLD'
+        # NB! 'BUY' ja 'SELL' read jäävad puutumata.
         response = supabase.table("trade_logs") \
             .delete() \
             .eq("action", "HOLD") \
             .lt("created_at", cutoff_date) \
             .execute()
         
-        # Loendame, kui palju ridu eemaldati (Supabase tagastab andmed .data all)
         deleted_count = len(response.data) if response.data else 0
-        
         logger.info(f"✅ Puhastus lõpetatud! Eemaldati {deleted_count} vana 'HOLD' rida.")
-        logger.info("📌 Kõik tehingud (BUY/SELL) ja viimase 3 päeva ajalugu on alles.")
 
     except Exception as e:
         logger.error(f"❌ Viga puhastamise käigus: {e}")
 
 if __name__ == "__main__":
-    # Saame lisada siia ka tsükli, et ta puhastaks nt kord ööpäevas
     run_smart_cleanup()
