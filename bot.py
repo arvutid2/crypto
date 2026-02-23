@@ -10,14 +10,17 @@ load_dotenv()
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 SYMBOL = "BTCUSDT"
 
-def get_fear_and_greed():
-    try:
-        r = requests.get("https://api.alternative.me/fng/").json()
-        return int(r['data'][0]['value'])
-    except: return 50
+# --- AI KAALUD (Algseaded, mida bot hakkab ise muulma) ---
+# Need näitavad, kui palju bot ühte või teist indikaatorit usaldab (1-5 skaalal)
+weights = {
+    "rsi": 3.0,
+    "bb_lower": 2.0,
+    "trend_4h": 4.0,
+    "fng": 2.0
+}
 
-def get_data(limit=150):
-    url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval=1h&limit={limit}"
+def get_binance_data(interval, limit=100):
+    url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={interval}&limit={limit}"
     data = requests.get(url).json()
     df = pd.DataFrame(data, columns=['time', 'open', 'high', 'low', 'close', 'vol', 'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore'])
     df[['open', 'high', 'low', 'close', 'vol']] = df[['open', 'high', 'low', 'close', 'vol']].astype(float)
@@ -29,99 +32,113 @@ def add_indicators(df):
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     df['rsi'] = 100 - (100 / (1 + gain / loss))
-    
-    # Bollinger Bands
+    # Bollinger
     df['sma20'] = df['close'].rolling(window=20).mean()
     df['std20'] = df['close'].rolling(window=20).std()
     df['lower_band'] = df['sma20'] - (df['std20'] * 2)
-    df['upper_band'] = df['sma20'] + (df['std20'] * 2)
-
-    # EMA-d trendi jaoks
-    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-    
-    # ATR (Volatiilsus stop-lossi jaoks)
-    df['high_low'] = df['high'] - df['low']
-    df['atr'] = df['high_low'].rolling(window=14).mean()
-    
+    # Trend
+    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
     return df
 
-def run_super_bot():
-    print(f"💎 SUPER-BOT KÄIVITATUD: {SYMBOL}")
-    
-    # ÕPPIMISE JA STRATEEGIA SEADED
-    target_rsi_buy = 32.0
-    trailing_stop_price = 0.0
-    entry_price = 0.0
-    last_balance = 10000.0
+def get_fear_and_greed():
+    try:
+        r = requests.get("https://api.alternative.me/fng/").json()
+        return int(r['data'][0]['value'])
+    except: return 50
 
+def ai_self_learning():
+    """Analüüsib viimaseid logisid ja muudab kaalusid (weights)"""
+    global weights
+    try:
+        # Toome viimased 10 logi, kus tehti mingi otsus (BUY/SELL)
+        logs = supabase.table("trade_logs").select("*").neq("action", "HOLD").order("created_at", desc=True).limit(5).execute().data
+        
+        if len(logs) < 2:
+            return # Pole veel piisavalt ajalugu, et õppida
+
+        print("🧠 AI Brain: Analüüsin mineviku vigu...")
+        for log in logs:
+            # Lihtsustatud õppimisloogika:
+            # Kui tehing oli SELL, aga hind tõusis edasi -> RSI/F&G valetasid (liiga varajane müük)
+            # Kui tehing oli BUY, aga hind langes -> Trendi-analüüs oli nõrk
+            current_price = float(get_binance_data('1m', 1).iloc[-1]['close'])
+            trade_price = float(log['price'])
+            
+            if log['action'] == "BUY" and current_price < trade_price:
+                # "Ma ostsin, aga hind langes. Ma usaldasin liiga palju RSI-d ja BB-d."
+                weights['rsi'] = max(1.0, weights['rsi'] - 0.1)
+                weights['trend_4h'] = min(5.0, weights['trend_4h'] + 0.1)
+            elif log['action'] == "SELL" and current_price > trade_price:
+                # "Ma müüsin, aga hind tõusis. Ma olin liiga kartlik."
+                weights['fng'] = max(1.0, weights['fng'] - 0.1)
+                
+    except Exception as e:
+        print(f"Iseõppimise viga: {e}")
+
+def run_ultimate_ai_bot():
+    print(f"🤖 ULTIMATE AI v6 KÄIVITATUD: {SYMBOL}")
+    
     while True:
         try:
-            df = add_indicators(get_data(100))
+            # 1. Õppimise faas
+            ai_self_learning()
+            
+            # 2. Andmete kogumine
+            df_1h = add_indicators(get_binance_data('1h'))
+            df_4h = add_indicators(get_binance_data('4h'))
             fng = get_fear_and_greed()
-            curr = df.iloc[-1]
-            price = curr['close']
+            
+            curr_1h = df_1h.iloc[-1]
+            curr_4h = df_4h.iloc[-1]
+            price = curr_1h['close']
             
             portfolio = supabase.table("portfolio").select("*").eq("id", 1).execute().data[0]
             usdt = float(portfolio['usdt_balance'])
             btc = float(portfolio['btc_balance'])
-            total_now = usdt + (btc * price)
-
-            # --- ISEÕPPIMINE: KORRIGEERIME KONSERVATIIVSUST ---
-            if total_now < last_balance * 0.995: # Kui kaotasime 0.5%
-                target_rsi_buy = max(25.0, target_rsi_buy - 0.2) # Muutu rangemaks
-                print(f"🛡️ Konservatiivsus tõusis: Uus RSI target {round(target_rsi_buy, 1)}")
-            elif total_now > last_balance * 1.005: # Kui võitsime 0.5%
-                target_rsi_buy = min(35.0, target_rsi_buy + 0.1) # Muutu julgemaks
             
-            last_balance = total_now
-
+            # --- AI OTSUSTUS-MAATRIKS ---
+            score = 0
+            max_score = sum(weights.values())
+            
+            if curr_1h['rsi'] < 30: score += weights['rsi']
+            if price <= curr_1h['lower_band']: score += weights['bb_lower']
+            if curr_4h['close'] > curr_4h['ema200']: score += weights['trend_4h']
+            if fng < 30: score += weights['fng']
+            
+            # Arvutame usaldusprotsendi (0-100%)
+            confidence = (score / max_score) * 100
+            
             action = "HOLD"
-            reason = "Ootel"
+            reason = f"Usaldus: {round(confidence, 1)}%"
 
-            # --- OSTU LOOGIKA (Super-Bot filtrid) ---
-            if usdt > 10:
-                # Osta kui: RSI on madal JA hind on BB põhja lähedal JA EMA trend ei ole järsult alla
-                if (curr['rsi'] < target_rsi_buy or price <= curr['lower_band']) and (price > curr['ema50']):
-                    action = "BUY"
-                    entry_price = price
-                    trailing_stop_price = price * 0.98 # Algne stop loss 2%
-                    btc_to_buy = usdt / price
-                    supabase.table("portfolio").update({"usdt_balance": 0, "btc_balance": btc_to_buy}).eq("id", 1).execute()
-                    reason = f"BUY: RSI {round(curr['rsi'],1)} | Trend OK"
+            # OSTAME ainult siis, kui usaldus on üle 70%
+            if usdt > 10 and confidence >= 70:
+                action = "BUY"
+                btc_to_buy = usdt / price
+                supabase.table("portfolio").update({"usdt_balance": 0, "btc_balance": btc_to_buy}).eq("id", 1).execute()
+                reason = f"AI BUY: Confidence {round(confidence, 1)}%"
 
-            # --- MÜÜGI LOOGIKA (Trailing Stop-Loss + Indikaatorid) ---
-            elif btc > 0:
-                # Uuendame trailing stopi kui hind tõuseb
-                if price * 0.98 > trailing_stop_price:
-                    trailing_stop_price = price * 0.98
-                
-                # Müü kui: Hind kukub alla trailing stopi VÕI RSI on liiga kõrge
-                if price <= trailing_stop_price:
-                    action = "SELL"
-                    reason = "TRAILING STOP: Kasum kaitstud / Kahjum piiratud"
-                elif curr['rsi'] > 68 or fng > 80:
-                    action = "SELL"
-                    reason = f"PROFIT SELL: RSI {round(curr['rsi'],1)} või Greed kõrge"
-                
-                if action == "SELL":
-                    usdt_rec = btc * price
-                    supabase.table("portfolio").update({"usdt_balance": usdt_rec, "btc_balance": 0}).eq("id", 1).execute()
-                    entry_price = 0
-                    trailing_stop_price = 0
+            # MÜÜME kui RSI on kõrge või portfell on kasumis
+            elif btc > 0 and (curr_1h['rsi'] > 65 or fng > 75):
+                action = "SELL"
+                usdt_rec = btc * price
+                supabase.table("portfolio").update({"usdt_balance": usdt_rec, "btc_balance": 0}).eq("id", 1).execute()
+                reason = "AI PROFIT SELL"
 
-            # --- ANDMETE SALVESTAMINE ---
-            supabase.table("portfolio").update({"total_value_usdt": total_now, "last_updated": "now()"}).eq("id", 1).execute()
+            # 3. Portfelli ja logide uuendamine
+            total_now = usdt + (btc * price)
+            supabase.table("portfolio").update({"total_value_usdt": total_now}).eq("id", 1).execute()
             
-            analysis = f"{reason} | RSI-Tgt: {round(target_rsi_buy, 1)} | F&G: {fng} | ATR: {round(curr['atr'], 2)}"
+            # Salvestame analüüsi koos selle hetke kaaludega
+            analysis = f"{reason} | Weights: R:{round(weights['rsi'],1)} T:{round(weights['trend_4h'],1)} | F&G: {fng}"
             supabase.table("trade_logs").insert({
-                "symbol": SYMBOL, "price": price, "rsi": curr['rsi'], "action": action, "analysis_summary": analysis
+                "symbol": SYMBOL, "price": price, "rsi": curr_1h['rsi'], "action": action, "analysis_summary": analysis
             }).execute()
 
-            print(f"📊 {time.strftime('%H:%M')} | Hind: {price} | Portfell: {round(total_now, 2)} | {action}")
+            print(f"📊 {time.strftime('%H:%M')} | Hind: {price} | AI Confidence: {round(confidence, 1)}% | {action}")
 
         except Exception as e:
             print(f"❌ Viga: {e}")
         time.sleep(60)
 
-run_super_bot()
+run_ultimate_ai_bot()
