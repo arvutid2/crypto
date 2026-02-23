@@ -5,3 +5,7 @@ python-dotenv
 requests
 python-binance
 pandas
+xgboost
+# optional for reinforcement learning/backtesting
+stable-baselines3
+gym
