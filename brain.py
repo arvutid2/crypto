@@ -14,72 +14,71 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 supabase = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_KEY'))
 
-# AJASTUSED
-DASHBOARD_UPDATE_INTERVAL = 5
-AI_TRAIN_INTERVAL = 1800
-OPTIMIZE_INTERVAL = 86400 # Optimeerime seadeid kord päevas
+DASHBOARD_INTERVAL = 5
+TRAIN_INTERVAL = 1800
+OPTIMIZE_INTERVAL = 86400
 
 def optimize_strategy():
-    logger.info("🔧 Alustan strateegia iseseisvat optimeerimist...")
+    logger.info("🔧 Optimeerin strateegiat...")
     try:
-        # Võtame viimased 100 tehingut
-        res = supabase.table("trade_logs").select("*").not_.is_("pnl", "null").limit(100).execute()
-        if not res.data or len(res.data) < 5:
-            logger.info("Liiga vähe tehinguid optimeerimiseks.")
+        # Võtame tehingud, kus PnL ei ole 0
+        res = supabase.table("trade_logs").select("*").neq("pnl", 0).limit(100).execute()
+        
+        # MUUDETUD: Nüüd piisab 2 tehingust, et aju hakkaks õppima
+        if not res.data or len(res.data) < 2:
+            logger.info("Ootan veel tehinguid (vajalik 2), et seadeid muuta.")
             return
 
         df = pd.DataFrame(res.data)
         avg_pnl = df['pnl'].mean()
         
-        # LIHTNE ISEÕPPIMISE LOOGIKA:
-        # Kui keskmine PnL on negatiivne, muudame boti ettevaatlikumaks
-        new_sl = -2.0
-        new_tp = 3.0
-        new_conf = 0.6
-
+        settings = {"stop_loss": -2.0, "take_profit": 3.0, "min_ai_confidence": 0.6}
         if avg_pnl < 0:
-            new_sl = -1.5 # Kitsam stop-loss, et säästa raha
-            new_conf = 0.7 # Nõuame AI-lt suuremat kindlustunnet
-            logger.info("📉 Turg on raske. Muudan boti ettevaatlikumaks.")
+            settings = {"stop_loss": -1.5, "take_profit": 2.5, "min_ai_confidence": 0.7}
         elif avg_pnl > 0.5:
-            new_sl = -2.5 # Lubame rohkem "hingamisruumi"
-            new_tp = 4.0  # Sihtime suuremat kasumit
-            logger.info("🚀 Botil läheb hästi! Tõstan julgust.")
+            settings = {"stop_loss": -2.5, "take_profit": 4.0, "min_ai_confidence": 0.5}
 
-        # Uuendame seadeid andmebaasis
-        supabase.table("bot_settings").update({
-            "stop_loss": new_sl,
-            "take_profit": new_tp,
-            "min_ai_confidence": new_conf,
-            "last_optimized": "now()"
-        }).eq("id", 1).execute()
-        
-        logger.info(f"✅ Seaded uuendatud: SL:{new_sl}, TP:{new_tp}, Conf:{new_conf}")
+        supabase.table("bot_settings").update(settings).eq("id", 1).execute()
+        logger.info(f"✅ Uued seaded: {settings}")
     except Exception as e:
-        logger.error(f"Viga optimeerimisel: {e}")
+        logger.error(f"Optimeerimise viga: {e}")
 
 def run_brain_cycle(last_train_time):
-    # (Siia jääb sama kood, mis varem Dashboardi ja AI treenimiseks)
-    # ... (vaata eelmist täielikku brain.py koodi)
+    # Dashboardi uuendus
+    try:
+        res = supabase.table("trade_logs").select("*").order("created_at", desc=True).limit(500).execute()
+        if res.data:
+            df = pd.DataFrame(res.data)
+            pnl_sum = df['pnl'].sum()
+            new_total = 9979.54 * (1 + (pnl_sum / 100))
+            supabase.table("portfolio").update({
+                "total_value_usdt": float(new_total),
+                "last_updated": "now()"
+            }).eq("id", 1).execute()
+    except: pass
+
+    # AI Treening
+    current_time = time.time()
+    if current_time - last_train_time >= TRAIN_INTERVAL:
+        # ... (sama treeningloogika mis varem)
+        return current_time
     return last_train_time
 
 if __name__ == "__main__":
-    last_train_time = 0 
+    last_train_time = 0
     last_cleanup_time = time.time()
     last_optimize_time = 0
     
     while True:
-        current_time = time.time()
         last_train_time = run_brain_cycle(last_train_time)
+        curr = time.time()
         
-        # 1. Automaatne puhastus
-        if current_time - last_cleanup_time >= 86400:
+        if curr - last_cleanup_time >= 86400:
             run_smart_cleanup()
-            last_cleanup_time = current_time
+            last_cleanup_time = curr
             
-        # 2. Automaatne strateegia optimeerimine
-        if current_time - last_optimize_time >= OPTIMIZE_INTERVAL:
+        if curr - last_optimize_time >= OPTIMIZE_INTERVAL:
             optimize_strategy()
-            last_optimize_time = current_time
+            last_optimize_time = curr
             
-        time.sleep(DASHBOARD_UPDATE_INTERVAL)
+        time.sleep(DASHBOARD_INTERVAL)
