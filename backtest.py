@@ -10,7 +10,7 @@ supabase = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_KEY'))
 def run_backtest():
     print("📥 Tõmban andmeid testimiseks...")
     # Tõmbame viimased 1000 rida ajalugu
-    res = supabase.table("trade_logs").select("*").not_.is_("vwap", "null").order("created_at", asc=False).execute()
+    res = supabase.table("trade_logs").select("*").not_.is_("vwap", "null").order("created_at", desc=True).execute()
     
     if not res.data or len(res.data) < 20:
         print("❌ Testimiseks on liiga vähe täielikke andmeid (vajalik vähemalt 20 rida).")
@@ -40,7 +40,7 @@ def run_backtest():
         features = [[
             price, row['rsi'], row['macd'], row['macd_signal'],
             row['vwap'], row['stoch_k'], row['stoch_d'],
-            row['atr'], row['ema200'], row['market_pressure'], row['fear_greed_index']
+            row['atr'], row['ema200'], row['market_pressure']
         ]]
         
         prediction = model.predict_proba(features)[0][1]
