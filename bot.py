@@ -1,86 +1,98 @@
 import os
 import time
 import requests
-import yfinance as yf
-import pandas_ta as ta
+import pandas as pd
 from supabase import create_client
 from dotenv import load_dotenv
 
-# Laeme seaded .env failist
 load_dotenv()
 
-# Supabase seaded
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Ühendus Supabase'iga
+url = os.getenv("SUPABASE_URL")
+key = os.getenv("SUPABASE_KEY")
+supabase = create_client(url, key)
 
-# Uudiste API (valikuline - kui sul on CryptoPanic võti, pane see .env faili)
-CRYPTO_PANIC_KEY = os.getenv("CRYPTO_PANIC_KEY")
+SYMBOL = "BTCUSDT"
 
-def get_sentiment():
-    """Küsime viimaseid uudiseid ja hindame meeleolu"""
-    if not CRYPTO_PANIC_KEY:
-        return 0 # Kui võtit pole, tagastame neutraalse tulemuse
-    
-    try:
-        url = f"https://cryptopanic.com/api/v1/posts/?auth_token={CRYPTO_PANIC_KEY}&currencies=BTC"
-        r = requests.get(url).json()
-        pos = sum([post.get('votes', {}).get('positive', 0) for post in r['results'][:10]])
-        neg = sum([post.get('votes', {}).get('negative', 0) for post in r['results'][:10]])
-        
-        total = pos + neg
-        return (pos - neg) / total if total > 0 else 0
-    except:
-        return 0
+def get_crypto_data():
+    url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval=1h&limit=50"
+    data = requests.get(url).json()
+    df = pd.DataFrame(data, columns=['time', 'open', 'high', 'low', 'close', 'vol', 'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore'])
+    df['close'] = df['close'].astype(float)
+    return df
+
+def calculate_rsi(df, period=14):
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def get_portfolio():
+    res = supabase.table("portfolio").select("*").eq("id", 1).execute()
+    return res.data[0]
+
+def update_portfolio(usdt, btc, price):
+    total = usdt + (btc * price)
+    supabase.table("portfolio").update({
+        "usdt_balance": usdt,
+        "btc_balance": btc,
+        "total_value_usdt": total,
+        "last_updated": "now()"
+    }).eq("id", 1).execute()
 
 def run_bot():
-    print("🚀 Bot on käivitatud ja otsib signaale...")
+    print("🚀 Bot õpib ja kaupleb...")
     
     while True:
         try:
-            # 1. Hinnainfo pärimine
-            ticker = yf.Ticker("BTC-USD")
-            data = ticker.history(period="1d", interval="15m")
-            current_price = data['Close'].iloc[-1]
+            df = get_crypto_data()
+            current_price = df['close'].iloc[-1]
+            rsi = calculate_rsi(df).iloc[-1]
+            portfolio = get_portfolio()
             
-            # 2. Tehniline analüüs (RSI)
-            rsi = ta.rsi(data['Close'], length=14).iloc[-1]
+            usdt = float(portfolio['usdt_balance'])
+            btc = float(portfolio['btc_balance'])
             
-            # 3. Uudiste analüüs
-            sentiment = get_sentiment()
-            
-            # 4. OTSUSE LOOGIKA (Siin on boti "tarkus")
-            # Kombineerime RSI ja uudised
             action = "HOLD"
-            analysis = f"RSI: {round(rsi, 1)}, Sentiment: {round(sentiment, 2)}. "
+            summary = f"RSI: {round(rsi, 2)}. "
+            
+            # --- LIHTNE ÕPPIMISLOOGIKA (AI ALGE) ---
+            # Bot vaatab trendi (viimased 3 tundi)
+            last_3_hours = df['close'].tail(3).mean()
+            is_uptrend = current_price > last_3_hours
 
-            if rsi < 35 and sentiment > 0:
+            if rsi < 35 and usdt > 10:
+                # OSTA: Kui RSI on madal ja meil on raha
+                btc_to_buy = usdt / current_price
+                update_portfolio(0, btc_to_buy, current_price)
                 action = "BUY"
-                analysis += "Turg on ülemüüdud ja uudised on positiivsed. Hea aeg osta!"
-            elif rsi > 65 and sentiment < 0:
+                summary += "Otsus: Madal RSI + Trend. Ostsime virtuaalselt BTC."
+            
+            elif rsi > 65 and btc > 0.0001:
+                # MÜÜ: Kui RSI on kõrge ja meil on BTC-d
+                usdt_from_sell = btc * current_price
+                update_portfolio(usdt_from_sell, 0, current_price)
                 action = "SELL"
-                analysis += "Turg on üleostetud ja uudised on negatiivsed. Targem on müüa."
+                summary += "Otsus: Kõrge RSI. Müüsime kasumi lukustamiseks."
+            
             else:
-                analysis += "Ootame selgemat signaali."
+                summary += "Ootame paremat hetke (HOLD)."
 
-            # 5. ANDMETE SAATMINE SUPABASE'I (Sinu Lovable dashboardile)
-            entry = {
-                "symbol": "BTC/USDT",
-                "price": float(current_price),
-                "rsi": float(rsi),
+            # Salvestame logisse
+            supabase.table("trade_logs").insert({
+                "symbol": SYMBOL,
+                "price": current_price,
+                "rsi": rsi,
                 "action": action,
-                "analysis_summary": analysis
-            }
-            
-            supabase.table("trade_logs").insert(entry).execute()
-            print(f"✅ Salvestatud: BTC @ {round(current_price, 2)} | Otsus: {action}")
-            
-            # Ootame 15 minutit enne järgmist kontrolli
-            time.sleep(60)
+                "analysis_summary": summary
+            }).execute()
+
+            print(f"✅ Hind: {current_price} | RSI: {round(rsi, 1)} | Portfell: {round(usdt + btc * current_price, 2)} USDT")
             
         except Exception as e:
-            print(f"❌ Viga tekkis: {e}")
-            time.sleep(60)
+            print(f"❌ Viga: {e}")
+            
+        time.sleep(60) # Testimiseks 1 minut, hiljem 900 (15 min)
 
-if __name__ == "__main__":
-    run_bot()
+run_bot()
