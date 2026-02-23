@@ -7,115 +7,128 @@ from supabase import create_client
 from dotenv import load_dotenv
 import logging
 
-# 1. Seadistame logimise
+# 1. LOGIMINE JA SEADED
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [bot] %(message)s')
 logger = logging.getLogger(__name__)
 
-# 2. Laeme keskkonnamuutujad
 load_dotenv()
-
-# Kontrollime vajalikke võtmeid
-BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
-BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET')
-SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY')
-
-# Algatame kliendid
-client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+client = Client(os.getenv('BINANCE_API_KEY'), os.getenv('BINANCE_API_SECRET'))
+supabase = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_KEY'))
 
 SYMBOL = 'BTCUSDT'
-INTERVAL = Client.KLINE_INTERVAL_15MINUTE
+INTERVAL = Client.KLINE_INTERVAL_5MINUTE
+last_buy_price = None
 
 def get_market_data(symbol):
     try:
-        # ÕPPIMINE: Küsime piisavalt ajalugu (7 päeva), et indikaatorid nagu EMA 200 töötaksid kohe
-        logger.info(f"Küsime ajaloolisi andmeid sümbolile {symbol}...")
-        klines = client.get_historical_klines(symbol, INTERVAL, "7 days ago UTC")
+        # KÜÜNLAD JA INDIKAATORID: Küsime 3 päeva ajalugu
+        klines = client.get_historical_klines(symbol, INTERVAL, "3 days ago UTC")
+        df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
         
-        df = pd.DataFrame(klines, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume', 
-            'close_time', 'quote_asset_volume', 'number_of_trades', 
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-        ])
+        # Tüübiteisendus
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, axis=1)
         
-        # Andmete tüübiteisendus
-        df['close'] = df['close'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        
-        # --- INDIKAATORITE ARVUTAMINE ---
-        # RSI (14 perioodi)
+        # Arvutame indikaatorid
         df['rsi'] = ta.rsi(df['close'], length=14)
-        
-        # EMA 200 (Vajab vähemalt 200 rida)
-        df['ema200'] = ta.ema(df['close'], length=200)
-        
-        # EMA 50 (Kiirem trendi tuvastamiseks)
         df['ema50'] = ta.ema(df['close'], length=50)
+        df['ema200'] = ta.ema(df['close'], length=200)
         
         return df
     except Exception as e:
         logger.error(f"Viga andmete pärimisel: {e}")
         return None
 
-def analyze_signals(df):
-    if df is None or len(df) < 200:
-        return "HOLD", "Ootame andmete kogunemist (EMA 200 vajab aega)."
-
-    last_row = df.iloc[-1]
-    price = last_row['close']
-    rsi = last_row['rsi']
-    ema200 = last_row['ema200']
-    
-    # LIHTNE STRATEEGIA:
-    # BUY: RSI on madal (<35) JA hind on üle EMA 200 (oleme tõusutrendis)
-    # SELL: RSI on kõrge (>70)
-    
-    if rsi < 35 and price > ema200:
-        action = "BUY"
-        summary = f"RSI on madal ({rsi:.1f}) ja oleme üle EMA 200. Siseneme tõusutrendi."
-    elif rsi > 70:
-        action = "SELL"
-        summary = f"RSI on ülemüüdud ({rsi:.1f}). Aeg kasumit võtta."
-    else:
-        action = "HOLD"
-        summary = f"RSI: {rsi:.1f} | EMA200: {ema200:.0f}. Ootame selgemat signaali."
+def get_order_book_status(symbol):
+    try:
+        # ORDER BOOK: Vaatame ostu- ja müügiseinte suhet (top 20)
+        depth = client.get_order_book(symbol=symbol, limit=20)
+        bid_vol = sum(float(ask[1]) for ask in depth['bids']) # Ostusoovid
+        ask_vol = sum(float(ask[1]) for ask in depth['asks']) # Müügisoovid
         
-    return action, summary
+        # Kui ostusoove on rohkem, on surve üles
+        return bid_vol > ask_vol, bid_vol / ask_vol
+    except:
+        return True, 1.0
+
+def analyze_signals(df):
+    global last_buy_price
+    if df is None or len(df) < 200:
+        return "HOLD", "Kogume ajalugu (EMA200)...", 0
+
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    # ORDER BOOK ANALÜÜS
+    bullish_book, book_ratio = get_order_book_status(SYMBOL)
+    
+    # KÜÜNALDE JA MAHU ANALÜÜS
+    is_green = curr['close'] > curr['open']
+    volume_surge = curr['volume'] > prev['volume']
+    
+    profit_pct = 0
+    action = "HOLD"
+    summary = ""
+
+    # --- ULTIMATE STRATEEGIA ---
+    
+    # 1. OSTU TINGIMUSED (KÕIK PEAVAD KLAPPIMA):
+    # - Trend: Hind > EMA50 ja EMA50 > EMA200
+    # - Momentum: RSI < 50 (agressiivne sisenemine)
+    # - Küünal: Roheline ja kasvav maht
+    # - Book: Ostusurve on suurem kui müügisurve
+    
+    if (curr['close'] > curr['ema50'] > curr['ema200']) and \
+       (curr['rsi'] < 50) and is_green and volume_surge and bullish_book:
+        
+        action = "BUY"
+        last_buy_price = curr['close']
+        summary = f"🚀 SUPER BUY: RSI:{curr['rsi']:.1f} | Vol+ | Book Ratio:{book_ratio:.2f}"
+
+    # 2. MÜÜGI TINGIMUSED:
+    # - RSI ülemüüdud (> 65)
+    # - VÕI Hind kukub alla EMA50 (Trendi murdumine)
+    # - VÕI Trailing stop-loss: hind kukub alla eelmise küünla madalaima punkti
+    
+    elif last_buy_price and (curr['rsi'] > 65 or curr['close'] < curr['ema50'] or curr['close'] < prev['low']):
+        action = "SELL"
+        profit_pct = ((curr['close'] - last_buy_price) / last_buy_price) * 100
+        summary = f"💰 SELL: Kasum {profit_pct:.2f}% | RSI:{curr['rsi']:.1f}"
+        last_buy_price = None
+
+    else:
+        summary = f"JÄLGIN: RSI:{curr['rsi']:.1f} | Book Ratio:{book_ratio:.2f} | Trend: {'UP' if curr['close'] > curr['ema50'] else 'DOWN'}"
+
+    return action, summary, profit_pct
 
 def start_bot():
-    logger.info("🚀 ULTIMATE SENTINEL V11 ARVUTID2 EDITION ON KÄIVITATUD!")
+    logger.info("🚀 ULTIMATE SENTINEL V13 KÄIVITATUD - KÕIK SÜSTEEMID ONLINE!")
     
     while True:
         try:
-            # 1. Hangi andmed
             df = get_market_data(SYMBOL)
-            
             if df is not None:
-                # 2. Analüüsi
-                action, summary = analyze_signals(df)
+                action, summary, profit = analyze_signals(df)
                 last_price = df.iloc[-1]['close']
-                last_rsi = df.iloc[-1]['rsi']
                 
-                # 3. Salvesta Supabase'i
-                data_to_save = {
+                # Salvestame Supabase'i
+                # Kontrolli, et Supabase tabelis on: symbol, price, rsi, action, analysis_summary
+                data = {
                     "symbol": SYMBOL,
                     "price": float(last_price),
-                    "rsi": float(last_rsi) if not pd.isna(last_rsi) else 0,
+                    "rsi": float(df.iloc[-1]['rsi']) if not pd.isna(df.iloc[-1]['rsi']) else 0,
                     "action": action,
                     "analysis_summary": summary
                 }
                 
-                result = supabase.table("trade_logs").insert(data_to_save).execute()
-                logger.info(f"✅ Salvestatud: {SYMBOL} @ {last_price} | Otsus: {action}")
+                supabase.table("trade_logs").insert(data).execute()
+                logger.info(f"✅ {SYMBOL} @ {last_price} | {action} | {summary}")
             
-            # Oota 60 sekundit enne uut kontrolli
-            time.sleep(60)
+            time.sleep(30) # Kontroll iga 30 sekundi järel
             
         except Exception as e:
-            logger.error(f"Süsteemne viga tsüklis: {e}")
-            time.sleep(30)
+            logger.error(f"Viga tsüklis: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
     start_bot()

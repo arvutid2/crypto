@@ -3,3 +3,5 @@ yfinance
 pandas_ta
 python-dotenv
 requests
+python-binance
+pandas
