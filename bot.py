@@ -65,7 +65,7 @@ def analyze_signals(df):
     price = curr['close']
     rsi = curr['rsi']
     
-    # 1. MASINÕPPE ENNUSTUS
+    # --- 1. MASINÕPPE ENNUSTUS ---
     prediction = 0.5
     if os.path.exists('trading_brain.pkl'):
         try:
@@ -74,7 +74,7 @@ def analyze_signals(df):
             prediction = brain_model.predict(input_df)[0]
         except: pass
 
-    # 2. TEHNILINE ANALÜÜS
+    # --- 2. TEHNILINE ANALÜÜS ---
     bullish_book, book_ratio = get_order_book_status(SYMBOL)
     is_green = curr['close'] > curr['open']
     volume_surge = curr['volume'] > prev['volume']
@@ -83,19 +83,40 @@ def analyze_signals(df):
     summary = ""
     profit_pct = 0
 
-    # 3. OTSUSTAMINE
+    # --- 3. OTSUSTAMISE LOOGIKA ---
+    
+    # OSTU REEGEL (Kui meil pole positsiooni)
     if last_buy_price is None:
         if (price > curr['ema50'] > curr['ema200'] and rsi < 55 and is_green and volume_surge) or \
            (prediction == 1 and price > curr['ema50']):
             action = "BUY"
             last_buy_price = price
-            summary = f"🚀 BUY | AI:{prediction} | RSI:{rsi:.1f} | Book:{book_ratio:.2f}"
-    
+            summary = f"🚀 BUY | AI:{prediction} | RSI:{rsi:.1f}"
+            logger.info(f"💰 POSITSIOON AVATUD: {price}")
+
+    # MÜÜGI REEGEL (Kui meil ON positsioon - Siia lisandub Stop-Loss)
     elif last_buy_price is not None:
-        if rsi > 65 or (prediction == 0 and rsi > 50) or price < curr['ema50']:
+        profit_pct = ((price - last_buy_price) / last_buy_price) * 100
+        
+        # A. STOP-LOSS (Hädapidur -2%)
+        if profit_pct <= -2.0:
             action = "SELL"
-            profit_pct = ((price - last_buy_price) / last_buy_price) * 100
-            summary = f"💰 SELL | Kasum:{profit_pct:.2f}% | AI:{prediction}"
+            summary = f"🛑 STOP-LOSS: {profit_pct:.2f}% | Hind: {price}"
+            logger.warning(f"⚠️ STOP-LOSS AKTIVEERITUD: {profit_pct:.2f}%")
+            last_buy_price = None
+
+        # B. TAKE-PROFIT (Kindel kasum +3%)
+        elif profit_pct >= 3.0:
+            action = "SELL"
+            summary = f"🎯 TAKE-PROFIT: {profit_pct:.2f}% | AI:{prediction}"
+            logger.info(f"✅ TAKE-PROFIT SAAVUTATUD: {profit_pct:.2f}%")
+            last_buy_price = None
+
+        # C. STRATEEGILINE MÜÜK (RSI või AI põhjal)
+        elif rsi > 68 or (prediction == 0 and rsi > 55) or price < curr['ema50']:
+            action = "SELL"
+            summary = f"💰 STRATEEGILINE SELL: {profit_pct:.2f}% | AI:{prediction}"
+            logger.info(f"✅ MÜÜK SIGNAALI PÕHJAL: {profit_pct:.2f}%")
             last_buy_price = None
 
     if action == "HOLD":
