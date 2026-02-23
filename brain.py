@@ -28,7 +28,7 @@ def train_ai_model():
         # Võtame kõik read, kus uued indikaatorid on täidetud
         res = supabase.table("trade_logs").select("*").not_.is_("macd", "null").order("created_at", desc=True).limit(1000).execute()
         
-        if not res.data or len(res.data) < 8:
+        if not res.data or len(res.data) < 20:
             logger.info(f"Ootel: Vaja on vähemalt 20 uute andmetega rida (hetkel on {len(res.data) if res.data else 0}).")
             return False
 
