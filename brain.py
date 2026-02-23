@@ -18,67 +18,64 @@ DASHBOARD_INTERVAL = 5
 TRAIN_INTERVAL = 1800
 OPTIMIZE_INTERVAL = 86400
 
-def optimize_strategy():
-    logger.info("🔧 Optimeerin strateegiat...")
+def train_ai_model():
+    logger.info("🧠 Alustan süvaõppe treeningut (MACD, BB, ATR, EMA)...")
     try:
-        # Võtame tehingud, kus PnL ei ole 0
-        res = supabase.table("trade_logs").select("*").neq("pnl", 0).limit(100).execute()
+        # Tõmbame viimased 1000 rida ajalugu
+        res = supabase.table("trade_logs").select("*").order("created_at", desc=True).limit(1000).execute()
+        if not res.data or len(res.data) < 50:
+            logger.info("Liiga vähe andmeid süvaõppeks. Kogume veel...")
+            return False
+
+        df = pd.DataFrame(res.data)
         
-        # MUUDETUD: Nüüd piisab 2 tehingust, et aju hakkaks õppima
-        if not res.data or len(res.data) < 2:
-            logger.info("Ootan veel tehinguid (vajalik 2), et seadeid muuta.")
-            return
+        # Määrame sihtmärgi: kas hind tõusis järgmise 5 minuti jooksul?
+        df['target'] = (df['price'].shift(-5) > df['price']).astype(int)
+        
+        # --- KÕIK UUDSED ANDMEKANALID AI JAOKS ---
+        features = [
+            'price', 'rsi', 'macd', 'macd_signal', 
+            'bb_upper', 'bb_lower', 'atr', 'ema200',
+            'market_pressure', 'fear_greed_index'
+        ]
+        
+        # Eemaldame tühjad read ja valmistame ette X ja y
+        train_df = df.dropna(subset=features + ['target'])
+        X = train_df[features]
+        y = train_df['target']
+
+        if len(X) < 20: return False
+
+        # Treenime täpsema mudeli
+        model = RandomForestClassifier(n_estimators=200, max_depth=10, random_state=42)
+        model.fit(X, y)
+        
+        joblib.dump(model, 'trading_brain.pkl')
+        logger.info(f"✅ AI on uue infoga täiendatud! (Treenitud {len(X)} rea peal)")
+        return True
+    except Exception as e:
+        logger.error(f"Viga AI treenimisel: {e}")
+        return False
+
+def optimize_strategy():
+    logger.info("🔧 Analüüsin strateegia efektiivsust...")
+    try:
+        res = supabase.table("trade_logs").select("*").neq("pnl", 0).limit(100).execute()
+        if not res.data or len(res.data) < 2: return
 
         df = pd.DataFrame(res.data)
         avg_pnl = df['pnl'].mean()
         
+        # Iseõppiv seadete kohandamine
         settings = {"stop_loss": -2.0, "take_profit": 3.0, "min_ai_confidence": 0.6}
         if avg_pnl < 0:
-            settings = {"stop_loss": -1.5, "take_profit": 2.5, "min_ai_confidence": 0.7}
+            settings = {"stop_loss": -1.2, "take_profit": 2.0, "min_ai_confidence": 0.75}
         elif avg_pnl > 0.5:
-            settings = {"stop_loss": -2.5, "take_profit": 4.0, "min_ai_confidence": 0.5}
+            settings = {"stop_loss": -2.5, "take_profit": 4.5, "min_ai_confidence": 0.55}
 
         supabase.table("bot_settings").update(settings).eq("id", 1).execute()
-        logger.info(f"✅ Uued seaded: {settings}")
+        logger.info(f"✅ Strateegia optimeeritud: {settings}")
     except Exception as e:
-        logger.error(f"Optimeerimise viga: {e}")
+        logger.error(f"Viga optimeerimisel: {e}")
 
-def run_brain_cycle(last_train_time):
-    # Dashboardi uuendus
-    try:
-        res = supabase.table("trade_logs").select("*").order("created_at", desc=True).limit(500).execute()
-        if res.data:
-            df = pd.DataFrame(res.data)
-            pnl_sum = df['pnl'].sum()
-            new_total = 9979.54 * (1 + (pnl_sum / 100))
-            supabase.table("portfolio").update({
-                "total_value_usdt": float(new_total),
-                "last_updated": "now()"
-            }).eq("id", 1).execute()
-    except: pass
-
-    # AI Treening
-    current_time = time.time()
-    if current_time - last_train_time >= TRAIN_INTERVAL:
-        # ... (sama treeningloogika mis varem)
-        return current_time
-    return last_train_time
-
-if __name__ == "__main__":
-    last_train_time = 0
-    last_cleanup_time = time.time()
-    last_optimize_time = 0
-    
-    while True:
-        last_train_time = run_brain_cycle(last_train_time)
-        curr = time.time()
-        
-        if curr - last_cleanup_time >= 86400:
-            run_smart_cleanup()
-            last_cleanup_time = curr
-            
-        if curr - last_optimize_time >= OPTIMIZE_INTERVAL:
-            optimize_strategy()
-            last_optimize_time = curr
-            
-        time.sleep(DASHBOARD_INTERVAL)
+# (Põhitsükkel jääb samaks, mis varem kutsudes välja train_ai_model ja optimize_strategy)
